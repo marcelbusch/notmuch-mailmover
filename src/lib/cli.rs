@@ -42,6 +42,10 @@ pub struct Cli {
     /// Enable dry-run mode, i.e. no files are being moved
     #[clap(short, long, action)]
     pub dry_run: bool,
+
+    /// Restrict all rules to mails also matching this notmuch query
+    #[arg(value_name = "QUERY")]
+    pub query: Option<String>,
 }
 
 #[derive(Clone, ValueEnum, Debug, Default)]

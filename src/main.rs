@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
     let start = Instant::now();
 
-    let actions = engine::apply_rules(&cfg, &db)?;
+    let actions = engine::apply_rules(&cfg, &db, opts.query.as_deref())?;
     action::apply_actions(&cfg, opts.dry_run, &actions)?;
 
     let duration = start.elapsed();

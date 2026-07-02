@@ -23,16 +23,24 @@ fn filter_messages_with_prefix(messages: &[PathBuf], prefix: &PathBuf) -> Vec<Pa
 /// Apply the given rules to the mails in the repository.
 /// The result is a HashMap which is assigns messages (files) to their new destination folders.
 /// Note that no messages are actually moved at this stage.
-pub fn apply_rules<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<PathBuf, &'a str>> {
+pub fn apply_rules<'a>(
+    cfg: &'a Config,
+    repo: &dyn MailRepo,
+    restrict: Option<&str>,
+) -> Result<HashMap<PathBuf, &'a str>> {
     debug!("applying rules");
     match cfg.rule_match_mode.unwrap_or(MatchMode::Unique) {
-        MatchMode::Unique => apply_unique(cfg, repo),
-        MatchMode::First => apply_first(cfg, repo),
-        MatchMode::All => apply_all(cfg, repo),
+        MatchMode::Unique => apply_unique(cfg, repo, restrict),
+        MatchMode::First => apply_first(cfg, repo, restrict),
+        MatchMode::All => apply_all(cfg, repo, restrict),
     }
 }
 
-fn apply_unique<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<PathBuf, &'a str>> {
+fn apply_unique<'a>(
+    cfg: &'a Config,
+    repo: &dyn MailRepo,
+    restrict: Option<&str>,
+) -> Result<HashMap<PathBuf, &'a str>> {
     let mut actions = HashMap::new();
     let n = cfg.rules.len();
     if n > 0 {
@@ -65,6 +73,9 @@ fn apply_unique<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<Path
                 if let Some(days) = cfg.max_age_days {
                     write!(combined_query, " AND date:\"{days}_days\"..")?;
                 }
+                if let Some(q) = restrict {
+                    write!(combined_query, " AND ({q})")?;
+                }
                 debug!("combined query: {combined_query}");
                 let all_messages = repo.search_message(&combined_query)?;
                 let messages = prefix
@@ -91,6 +102,9 @@ fn apply_unique<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<Path
         if let Some(days) = cfg.max_age_days {
             write!(query_str, " AND date:\"{days}_days\"..")?;
         }
+        if let Some(q) = restrict {
+            write!(query_str, " AND ({q})")?;
+        }
         debug!("using query: {query_str}");
         let all_messages = repo.search_message(&query_str)?;
         let messages = if let Some(pre) = &rule.prefix {
@@ -111,7 +125,11 @@ fn apply_unique<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<Path
     Ok(actions)
 }
 
-fn apply_first<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<PathBuf, &'a str>> {
+fn apply_first<'a>(
+    cfg: &'a Config,
+    repo: &dyn MailRepo,
+    restrict: Option<&str>,
+) -> Result<HashMap<PathBuf, &'a str>> {
     let mut actions = HashMap::new();
     // exclude previous rules and folders
     let mut exclude = String::with_capacity(32768);
@@ -122,6 +140,9 @@ fn apply_first<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<PathB
         }
         if let Some(days) = cfg.max_age_days {
             write!(query_str, " AND date:\"{days}_days\"..")?;
+        }
+        if let Some(q) = restrict {
+            write!(query_str, " AND ({q})")?;
         }
 
         let messages = repo.search_message(&query_str)?;
@@ -143,12 +164,19 @@ fn apply_first<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<PathB
     Ok(actions)
 }
 
-fn apply_all<'a>(cfg: &'a Config, repo: &dyn MailRepo) -> Result<HashMap<PathBuf, &'a str>> {
+fn apply_all<'a>(
+    cfg: &'a Config,
+    repo: &dyn MailRepo,
+    restrict: Option<&str>,
+) -> Result<HashMap<PathBuf, &'a str>> {
     let mut actions = HashMap::new();
     for rule in &cfg.rules {
         let mut query_str = format!("({})", &rule.query);
         if let Some(days) = cfg.max_age_days {
             write!(query_str, " AND date:\"{days}_days\"..")?;
+        }
+        if let Some(q) = restrict {
+            write!(query_str, " AND ({q})")?;
         }
         let messages = repo.search_message(&query_str)?;
         debug!("query '{}' returned {} messages", query_str, messages.len());
@@ -216,7 +244,7 @@ mod tests {
             "some.mail".to_string(),
         );
 
-        let actions = apply_rules(&cfg, &repo).unwrap();
+        let actions = apply_rules(&cfg, &repo, None).unwrap();
         assert_eq!(
             1,
             actions.len(),
@@ -226,6 +254,54 @@ mod tests {
         let pb = PathBuf::from_str("some.mail").unwrap();
         let folder = *actions.get(&pb).unwrap();
         assert_eq!("Trash", folder);
+    }
+
+    #[test]
+    fn restrict_query_test() {
+        let mut cfg: Config = Default::default();
+        cfg.rules.push(Rule {
+            folder: "Trash".to_string(),
+            query: "tag:trash".to_string(),
+            prefix: None,
+        });
+
+        let mut repo: DummyRepo = Default::default();
+        // only mails also matching the restrict query are considered
+        repo.add_mail(
+            "NOT folder:\"Trash\" AND (tag:trash) AND (from:boss@corp.com)".to_string(),
+            "some.mail".to_string(),
+        );
+
+        let actions = apply_rules(&cfg, &repo, Some("from:boss@corp.com")).unwrap();
+        assert_eq!(actions.len(), 1, "actions was: {actions:?}");
+        let pb = PathBuf::from_str("some.mail").unwrap();
+        assert_eq!("Trash", *actions.get(&pb).unwrap());
+    }
+
+    #[test]
+    fn restrict_query_with_max_age_test() {
+        // restrict and max_age_days must compose: both clauses appended
+        let cfg = Config {
+            max_age_days: Some(30),
+            rules: vec![Rule {
+                folder: "Trash".to_string(),
+                query: "tag:trash".to_string(),
+                prefix: None,
+            }],
+            ..Default::default()
+        };
+
+        let mut repo: DummyRepo = Default::default();
+        repo.add_mail(
+            "NOT folder:\"Trash\" AND (tag:trash) AND date:\"30_days\".. AND (from:boss@corp.com)"
+                .to_string(),
+            "some.mail".to_string(),
+        );
+
+        let actions = apply_rules(&cfg, &repo, Some("from:boss@corp.com")).unwrap();
+        assert_eq!(actions.len(), 1, "actions was: {actions:?}");
+        let pb = PathBuf::from_str("some.mail").unwrap();
+        assert_eq!("Trash", *actions.get(&pb).unwrap());
     }
 
     #[test]
@@ -256,7 +332,7 @@ mod tests {
         cfg2.rule_match_mode = Some(MatchMode::Unique);
 
         for cfg in &[cfg1, cfg2] {
-            let actions = apply_rules(cfg, &repo);
+            let actions = apply_rules(cfg, &repo, None);
             assert!(actions.is_err());
             let err = actions.unwrap_err();
             assert_eq!("Ambiguous rule! Message already assigned to folder Trash, cannot assign to folder Deleted", err.to_string());
@@ -287,7 +363,7 @@ mod tests {
             "(NOT folder:Trash) AND (tag:trash)".to_string(),
             "some.mail".to_string(),
         );
-        let actions = apply_rules(&cfg, &repo).unwrap();
+        let actions = apply_rules(&cfg, &repo, None).unwrap();
         assert_eq!(actions.len(), 1);
         let pb = PathBuf::from_str("some.mail").unwrap();
         let folder = *actions.get(&pb).unwrap();
@@ -315,7 +391,7 @@ mod tests {
 
         let mut repo: DummyRepo = Default::default();
         repo.add_mail("(tag:trash)".to_string(), "some.mail".to_string());
-        let actions = apply_rules(&cfg, &repo).unwrap();
+        let actions = apply_rules(&cfg, &repo, None).unwrap();
         assert_eq!(actions.len(), 1);
         let pb = PathBuf::from_str("some.mail").unwrap();
         let folder = *actions.get(&pb).unwrap();
@@ -351,7 +427,7 @@ mod tests {
             format!("{}/mailbox2/some.mail", cfg.maildir),
         );
 
-        let actions = apply_rules(&cfg, &repo).unwrap();
+        let actions = apply_rules(&cfg, &repo, None).unwrap();
         assert_eq!(actions.len(), 2);
 
         dbg!(&actions);
