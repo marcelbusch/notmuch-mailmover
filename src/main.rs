@@ -1,34 +1,43 @@
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Context, Result};
 use env_logger::Env;
 use log::{debug, info};
 use std::time::Instant;
 
-use nm_mailmover::{action, cli, config, engine};
+mod cli;
+mod config;
+
+use nm_mailmover::{action, engine};
 
 fn main() -> Result<()> {
-    let opts = cli::Cli::parse();
+    let opts: cli::Cli = argh::from_env();
+
+    // Argh has no built-in version flag, unlike clap's `#[command(version)]`.
+    if opts.version {
+        println!("notmuch-mailmover {}", cli::VERSION);
+        return Ok(());
+    }
 
     let env = Env::default().default_filter_or(opts.log_level.to_string());
     env_logger::try_init_from_env(env)?;
 
-    let cfg = config::load_config(&opts.config)?;
+    let cfg = config::load_or_create_config(&opts.config)?;
     debug!("successfully loaded {cfg:?}");
-    let db_path: Option<String> = None;
 
     debug!("opening notmuch db");
     let db = notmuch::Database::open_with_config(
-        db_path,
+        None::<&str>,
         notmuch::DatabaseMode::ReadOnly,
         cfg.notmuch_config.as_ref(),
         None,
-    )?;
+    )
+    .context("failed to open notmuch database")?;
     debug!("successfully opened notmuch db");
 
     let start = Instant::now();
 
-    let actions = engine::apply_rules(&cfg, &db, opts.query.as_deref())?;
-    action::apply_actions(&cfg, opts.dry_run, &actions)?;
+    let moves = engine::plan_moves(&cfg, &db, opts.query.as_deref()).context("failed to plan moves")?;
+    action::move_files(&cfg.maildir, cfg.rename, opts.dry_run, &moves)
+        .context("failed to move files")?;
 
     let duration = start.elapsed();
     info!("execution took {duration:?}");
