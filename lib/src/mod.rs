@@ -97,6 +97,10 @@ pub enum Error {
     #[error("Failed to get mailbox name from {0}")]
     NoMailboxName(String),
 
+    /// The restrict query is empty or would break out of its parentheses.
+    #[error("{0}")]
+    InvalidRestrictQuery(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

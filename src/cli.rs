@@ -38,6 +38,10 @@ pub struct Cli {
     /// print version information
     #[argh(switch, short = 'V')]
     pub version: bool,
+
+    /// restrict all rules to mails also matching this notmuch query
+    #[argh(option, short = 'q')]
+    pub query: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -89,6 +93,19 @@ mod tests {
         assert_eq!(cli.log_level, LogLevel::Info);
         assert!(!cli.dry_run);
         assert!(!cli.version);
+        assert_eq!(cli.query, None);
+    }
+
+    #[test]
+    fn parses_restrict_query() {
+        let cli = parse(&["-d", "-q", "folder:INBOX and from:boss@corp.com"]).unwrap();
+        assert!(cli.dry_run);
+        assert_eq!(
+            cli.query.as_deref(),
+            Some("folder:INBOX and from:boss@corp.com")
+        );
+        assert!(parse(&["dry-run"]).is_err(), "a bare word is not a query");
+        assert!(parse(&["-q", "a", "b"]).is_err(), "unquoted extra word");
     }
 
     #[test]
@@ -100,18 +117,22 @@ mod tests {
             "debug",
             "--dry-run",
             "--version",
+            "--query",
+            "tag:inbox",
         ])
         .unwrap();
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/cfg.yaml")));
         assert_eq!(cli.log_level, LogLevel::Debug);
         assert!(cli.dry_run);
         assert!(cli.version);
+        assert_eq!(cli.query.as_deref(), Some("tag:inbox"));
 
-        let short = parse(&["-c", "cfg.yaml", "-l", "trace", "-d", "-V"]).unwrap();
+        let short = parse(&["-c", "cfg.yaml", "-l", "trace", "-d", "-V", "-q", "x"]).unwrap();
         assert_eq!(short.config, Some(PathBuf::from("cfg.yaml")));
         assert_eq!(short.log_level, LogLevel::Trace);
         assert!(short.dry_run);
         assert!(short.version);
+        assert_eq!(short.query.as_deref(), Some("x"));
     }
 
     #[test]

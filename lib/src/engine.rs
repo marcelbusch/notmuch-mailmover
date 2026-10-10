@@ -53,7 +53,8 @@ fn filter_by_prefix(messages: &[PathBuf], prefix: &Path) -> Vec<PathBuf> {
 /// Every query is wrapped in `NOT folder:"<folder>" AND (...)`, so messages
 /// already sitting in their destination are not returned and stay put. When
 /// [`Config::max_age_days`] is set, `date:"<days>_days"..` is appended, limiting
-/// the search to recent messages.
+/// the search to recent messages. See [`plan_moves_restricted`] to only consider
+/// a subset of the messages.
 ///
 /// [`Config::rule_match_mode`] selects between three strategies:
 ///
@@ -71,18 +72,71 @@ fn filter_by_prefix(messages: &[PathBuf], prefix: &Path) -> Vec<PathBuf> {
 /// Returns an error if a query fails, or (in [`MatchMode::Unique`]) if two rules
 /// overlap or assign one message to two folders.
 pub fn plan_moves<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Moves<'a>> {
+    plan_moves_restricted(cfg, repo, None)
+}
+
+/// Like [`plan_moves`], but when `restrict` is set, ` AND (<restrict>)` is
+/// appended to every query (including the overlap probes of
+/// [`MatchMode::Unique`]), so only messages also matching it are considered,
+/// e.g. a single mailbox or even a single message.
+///
+/// # Errors
+///
+/// Like [`plan_moves`], and additionally [`Error::InvalidRestrictQuery`] before
+/// any query runs if `restrict` is blank, or its parentheses or double quotes
+/// do not balance (which would let it escape the `folder:` guard).
+pub fn plan_moves_restricted<'a>(
+    cfg: &'a impl Config,
+    repo: &dyn Repo,
+    restrict: Option<&str>,
+) -> Result<Moves<'a>> {
+    let restrict = restrict.map(validate_restrict).transpose()?;
     debug!("planning moves");
     let assigned = match cfg.rule_match_mode() {
-        MatchMode::Unique => plan_unique(cfg, repo),
-        MatchMode::First => plan_first(cfg, repo),
-        MatchMode::All => plan_all(cfg, repo),
+        MatchMode::Unique => plan_unique(cfg, repo, restrict),
+        MatchMode::First => plan_first(cfg, repo, restrict),
+        MatchMode::All => plan_all(cfg, repo, restrict),
     }?;
     let mut moves: Moves<'a> = assigned.into_iter().collect();
     moves.sort_by(|(a, _), (b, _)| a.cmp(b));
     Ok(moves)
 }
 
-/// Searches the messages of `rule`, restricted to `rule.prefix`.
+/// Returns `q` trimmed, or an error if it is blank or unbalanced.
+///
+/// A blank query is rejected rather than ignored, so `-q "$UNSET"` does not
+/// silently turn into a run over all messages. Parentheses inside double quotes
+/// (phrases) do not count.
+fn validate_restrict(q: &str) -> Result<&str> {
+    let q = q.trim();
+    if q.is_empty() {
+        return Err(Error::InvalidRestrictQuery(
+            "restrict query is empty".to_string(),
+        ));
+    }
+    let mut depth = 0i32;
+    let mut in_quotes = false;
+    for c in q.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            '(' if !in_quotes => depth += 1,
+            ')' if !in_quotes => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            break;
+        }
+    }
+    if depth != 0 || in_quotes {
+        return Err(Error::InvalidRestrictQuery(format!(
+            "restrict query has unbalanced parentheses or quotes: {q}"
+        )));
+    }
+    Ok(q)
+}
+
+/// Searches the messages of `rule`, restricted to `rule.prefix` and, if set, to
+/// messages also matching `restrict`.
 ///
 /// `guard` is ANDed in front of the rule's query, so callers own the `folder:`
 /// exclusion and, in [`MatchMode::First`], the queries of earlier rules. The
@@ -93,6 +147,7 @@ fn search_rule(
     repo: &dyn Repo,
     rule: &Rule,
     guard: &str,
+    restrict: Option<&str>,
 ) -> Result<Vec<PathBuf>> {
     let mut query_str = String::with_capacity(256);
     if !guard.is_empty() {
@@ -101,6 +156,9 @@ fn search_rule(
     write!(query_str, "({})", rule.query)?;
     if let Some(days) = cfg.max_age_days() {
         write!(query_str, " AND date:\"{days}_days\"..")?;
+    }
+    if let Some(q) = restrict {
+        write!(query_str, " AND ({q})")?;
     }
     debug!("using query: {query_str}");
     let messages = repo.search_messages(&query_str)?;
@@ -117,7 +175,11 @@ fn search_rule(
     })
 }
 
-fn plan_unique<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>> {
+fn plan_unique<'a>(
+    cfg: &'a impl Config,
+    repo: &dyn Repo,
+    restrict: Option<&str>,
+) -> Result<Assigned<'a>> {
     let mut moves = Assigned::new();
     let rules = cfg.rules();
     if rules.len() > 1 {
@@ -135,7 +197,7 @@ fn plan_unique<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>
         // (earlier rule, later rule) -> paths both returned, logged once per pair.
         let mut overlaps: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for (i, rule) in rules.iter().enumerate() {
-            for path in search_rule(cfg, repo, rule, "")? {
+            for path in search_rule(cfg, repo, rule, "", restrict)? {
                 let mut hasher = DefaultHasher::new();
                 path.hash(&mut hasher);
                 match claimed.entry(hasher.finish()) {
@@ -165,7 +227,7 @@ fn plan_unique<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>
 
     for rule in cfg.rules() {
         let guard = format!("NOT folder:\"{}\"", rule.folder);
-        let messages = search_rule(cfg, repo, rule, &guard)?;
+        let messages = search_rule(cfg, repo, rule, &guard, restrict)?;
         for filename in messages {
             debug!("processing {:?}", filename.to_str());
             if let Some(old) = assign(&mut moves, filename, rule.folder.as_str())
@@ -181,7 +243,11 @@ fn plan_unique<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>
     Ok(moves)
 }
 
-fn plan_first<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>> {
+fn plan_first<'a>(
+    cfg: &'a impl Config,
+    repo: &dyn Repo,
+    restrict: Option<&str>,
+) -> Result<Assigned<'a>> {
     let mut moves = Assigned::new();
     // exclude previous rules and folders
     let mut exclude = String::with_capacity(32768);
@@ -190,7 +256,7 @@ fn plan_first<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>>
         if !exclude.is_empty() {
             write!(guard, " AND ({exclude})")?;
         }
-        let messages = search_rule(cfg, repo, rule, &guard)?;
+        let messages = search_rule(cfg, repo, rule, &guard, restrict)?;
         debug!(
             "query with guard '{}' returned {} messages",
             guard,
@@ -213,13 +279,17 @@ fn plan_first<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>>
     Ok(moves)
 }
 
-fn plan_all<'a>(cfg: &'a impl Config, repo: &dyn Repo) -> Result<Assigned<'a>> {
+fn plan_all<'a>(
+    cfg: &'a impl Config,
+    repo: &dyn Repo,
+    restrict: Option<&str>,
+) -> Result<Assigned<'a>> {
     let mut moves = Assigned::new();
     for rule in cfg.rules() {
         // guard against the destination folder too, else every run re-picks mail already
         // moved there and, with rename, churns its UUID
         let guard = format!("NOT folder:\"{}\"", rule.folder);
-        let messages = search_rule(cfg, repo, rule, &guard)?;
+        let messages = search_rule(cfg, repo, rule, &guard, restrict)?;
         debug!("query for rule {rule} returned {} messages", messages.len());
         for msg in messages {
             let fname = msg
@@ -436,6 +506,101 @@ mod tests {
                 .map(|(p, _)| p.to_str().unwrap())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn restrict_query_test() {
+        let mut cfg: TestConfig = Default::default();
+        cfg.rules.push(Rule {
+            folder: "Trash".to_string(),
+            query: "tag:trash".to_string(),
+            prefix: None,
+        });
+
+        let mut repo: DummyRepo = Default::default();
+        // only mails also matching the restrict query are considered
+        repo.add_mail(
+            "NOT folder:\"Trash\" AND (tag:trash) AND (from:boss@corp.com)".to_string(),
+            "some.mail".to_string(),
+        );
+
+        let moves = plan_moves_restricted(&cfg, &repo, Some("from:boss@corp.com")).unwrap();
+        assert_eq!(moves.len(), 1, "moves was: {moves:?}");
+        assert_eq!(Some("Trash"), folder_of(&moves, Path::new("some.mail")));
+    }
+
+    #[test]
+    fn restrict_query_with_max_age_test() {
+        // restrict and max_age_days must compose: both clauses appended
+        let cfg = TestConfig {
+            max_age_days: Some(30),
+            rules: vec![Rule {
+                folder: "Trash".to_string(),
+                query: "tag:trash".to_string(),
+                prefix: None,
+            }],
+            ..Default::default()
+        };
+
+        let mut repo: DummyRepo = Default::default();
+        repo.add_mail(
+            "NOT folder:\"Trash\" AND (tag:trash) AND date:\"30_days\".. AND (from:boss@corp.com)"
+                .to_string(),
+            "some.mail".to_string(),
+        );
+
+        let moves = plan_moves_restricted(&cfg, &repo, Some("from:boss@corp.com")).unwrap();
+        assert_eq!(moves.len(), 1, "moves was: {moves:?}");
+        assert_eq!(Some("Trash"), folder_of(&moves, Path::new("some.mail")));
+    }
+
+    /// The overlap probes are restricted too, so rules that overlap only outside
+    /// the restricted subset do not abort the run.
+    #[test]
+    fn restrict_query_applies_to_overlap_probes() {
+        let mut cfg: TestConfig = Default::default();
+        for folder in ["Trash", "Deleted"] {
+            cfg.rules.push(Rule {
+                folder: folder.to_string(),
+                query: "tag:trash".to_string(),
+                prefix: None,
+            });
+        }
+
+        let mut repo: DummyRepo = Default::default();
+        repo.add_mail("(tag:trash)".to_string(), "some.mail".to_string());
+
+        assert!(plan_moves(&cfg, &repo).is_err());
+        assert!(plan_moves_restricted(&cfg, &repo, Some("from:boss@corp.com")).is_ok());
+    }
+
+    #[test]
+    fn validate_restrict_test() {
+        for bad in ["", "  ", "a) OR (b", "(a", "a)", "\"a", ")("] {
+            assert!(validate_restrict(bad).is_err(), "{bad:?} must be rejected");
+        }
+        for good in ["subject:\"(re)\"", "(a or b) and c", "tag:inbox"] {
+            assert_eq!(validate_restrict(good).unwrap(), good);
+        }
+        assert_eq!(validate_restrict(" tag:inbox ").unwrap(), "tag:inbox");
+    }
+
+    /// A bad restrict query is rejected before anything is searched.
+    #[test]
+    fn invalid_restrict_query_runs_no_search() {
+        let mut cfg: TestConfig = Default::default();
+        cfg.rules.push(Rule {
+            folder: "Trash".to_string(),
+            query: "tag:trash".to_string(),
+            prefix: None,
+        });
+        let repo: DummyRepo = Default::default();
+
+        for bad in ["", "a) OR (b"] {
+            let err = plan_moves_restricted(&cfg, &repo, Some(bad)).unwrap_err();
+            assert!(matches!(err, Error::InvalidRestrictQuery(_)), "{err}");
+        }
+        assert_eq!(0, repo.search_count());
     }
 
     #[test]

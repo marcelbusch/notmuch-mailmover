@@ -35,7 +35,11 @@ fn main() -> Result<()> {
 
     let start = Instant::now();
 
-    let moves = engine::plan_moves(&cfg, &db, opts.query.as_deref()).context("failed to plan moves")?;
+    if let Some(q) = &opts.query {
+        info!("restricting all rules to: {q}");
+    }
+    let moves = engine::plan_moves_restricted(&cfg, &db, opts.query.as_deref())
+        .context("failed to plan moves")?;
     action::move_files(&cfg.maildir, cfg.rename, opts.dry_run, &moves)
         .context("failed to move files")?;
 

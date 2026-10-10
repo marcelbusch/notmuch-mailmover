@@ -400,3 +400,46 @@ fn overlapping_rules_are_rejected_before_anything_moves() {
         "nothing may be moved when the rules overlap"
     );
 }
+
+#[test]
+fn restrict_query_moves_only_matching_mail() {
+    let fixture = Fixture::new("restrict-query");
+
+    let output = fixture.mailmover(&["--query", "folder:\"INBOX.lists/rust\""]);
+
+    assert!(
+        stderr(&output).contains("restricting all rules to: folder:\"INBOX.lists/rust\""),
+        "the restriction must be logged, got: {}",
+        stderr(&output)
+    );
+    assert_eq!(
+        vec![
+            "Archive/new/1700000004.4.nmm-it",
+            "INBOX/cur/1700000000.0.nmm-it:2,S",
+            "INBOX/cur/1700000001.1.nmm-it:2,FS",
+            "INBOX/cur/1700000002.2.nmm-it:2,",
+            "INBOX/new/1700000003.3.nmm-it",
+        ],
+        fixture.listing(),
+        "only the mail matching the restrict query may move"
+    );
+}
+
+#[test]
+fn empty_or_unbalanced_restrict_query_is_rejected() {
+    let fixture = Fixture::new("bad-restrict-query");
+    let before = fixture.listing();
+
+    for (query, expected) in [
+        ("", "restrict query is empty"),
+        ("a) OR (b", "unbalanced parentheses or quotes"),
+    ] {
+        let output = fixture.mailmover_fails(&["-q", query]);
+        assert!(
+            stderr(&output).contains(expected),
+            "{query:?}: expected {expected:?}, got: {}",
+            stderr(&output)
+        );
+    }
+    assert_eq!(before, fixture.listing(), "nothing may move");
+}

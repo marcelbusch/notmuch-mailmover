@@ -3,7 +3,7 @@
 notmuch-mailmover \- move notmuch tagged mails into Maildir folders
 .SH SYNOPSIS
 .B notmuch-mailmover
-[\fB\-c\fR \fIFILE\fR] [\fB\-l\fR \fILEVEL\fR] [\fB\-d\fR] [\fB\-V\fR]
+[\fB\-c\fR \fIFILE\fR] [\fB\-l\fR \fILEVEL\fR] [\fB\-d\fR] [\fB\-q\fR \fIQUERY\fR] [\fB\-V\fR]
 .SH DESCRIPTION
 Move notmuch tagged mails into Maildir folders
 .SH OPTIONS
@@ -16,6 +16,10 @@ configure the log level [default: info] [possible values: trace, debug, info, wa
 .TP
 \fB\-d\fR, \fB\-\-dry\-run\fR
 enable dry-run mode, i.e. no files are being moved
+.TP
+\fB\-q\fR, \fB\-\-query\fR \fIQUERY\fR
+restrict all rules to mails also matching this notmuch query; pass it as one
+(quoted) argument, parentheses and double quotes must balance
 .TP
 \fB\-V\fR, \fB\-\-version\fR
 print version information

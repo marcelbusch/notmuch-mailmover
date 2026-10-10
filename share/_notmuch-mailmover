@@ -7,6 +7,7 @@ _notmuch-mailmover() {
         '(-l --log-level)'{-l,--log-level}'[configure the log level]:level:(trace debug info warn error)' \
         '(-d --dry-run)'{-d,--dry-run}'[enable dry-run mode, i.e. no files are being moved]' \
         '(-h --help)'{-h,--help}'[print help information]' \
+        '(-q --query)'{-q,--query}'[restrict all rules to mails also matching this notmuch query]:query:' \
         '--version[print version information]'
     )
     _arguments -s $arguments

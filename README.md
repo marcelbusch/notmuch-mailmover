@@ -66,6 +66,15 @@ They need the `notmuch` binary on `PATH`; the unit tests do not.
 It's recommended to run `notmuch-mailmover` as part of your [notmuch pre-new hook](https://notmuch.readthedocs.io/en/latest/man5/notmuch-hooks.html).
 You can also invoke `notmuch-mailmover` directly, but don't forget to run `notmuch new` afterward (this isn't necessary if you add it as a pre-hook).
 
+To only move a subset of your mail, pass a notmuch query with `-q`/`--query`.
+It is ANDed to every rule, e.g. to try your rules on a single mailbox first:
+
+```sh
+notmuch-mailmover --dry-run --query 'folder:INBOX and from:boss@corp.com'
+```
+
+Note that in `unique` match-mode the overlap check then only covers that subset.
+
 ## Configuration
 
 Running `notmuch-mailmover` for the first time will create `$XDG_CONFIG_HOME/notmuch-mailmover/config.yaml`.
